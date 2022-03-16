@@ -1,0 +1,245 @@
+---
+title: "Main exercise_GonzaloDíazAmor"
+output: html_document
+---
+
+Main exercise: Given a soil microbiome dataset, to design and develop a model to determine the location of novel samples.
+
+Take as input the file 1_taxa_counts.csv. Each cell is the abundance of one taxon in that sample.
+
+Classify the samples without an assigned class in the 1_metadata.csv file. Additionally, you could also report the probability to belong to the predicted class.
+
+Determine the most relevant taxa (i.e. otuids) to classify the samples
+
+```{r libraries, message=FALSE, warning=FALSE, echo=FALSE,eval=TRUE}
+library(readr)
+library(dplyr)
+library(tidyverse)
+library(caret)
+library(nnet)
+library(stats)
+library(FactoMineR)
+library(factoextra)
+library(corrplot)
+library(randomForest)
+library(MASS)
+library(neuralnet)
+library(nnet)
+library(ggplot2)
+library(data.table)
+library(mltools)
+
+
+```
+
+# Data Lecture
+
+We load the file '1_taxa_counts.csv' and '1_metadata.csv'. In the first file we can see that we have 717 rows and 201 variables and in the second file we have 200 rows and 2 variables.
+
+```{r,echo=FALSE}
+datos1 <- read_csv("C:/Users/gdiaz/Desktop/GDA/biomemaker/exercise_biostatistician_input_files/1_taxa_counts.csv")
+meta1 <- read_csv("C:/Users/gdiaz/Desktop/GDA/biomemaker/exercise_biostatistician_input_files/1_metadata.csv")
+print(dim(datos1))
+print(dim(meta1))
+```
+
+We transpose the first file and perform a description and cleaning of the data.
+
+```{r}
+#ID 
+id1<-colnames(datos1)
+#Transpose
+datos1<-t(datos1)
+datos1<-as.data.frame(datos1)
+
+#in meta I have the id and the class
+meta1<-as.data.frame(meta1)
+#First row as name of the columns
+colnames(datos1) <- datos1[1,]
+datos1 <- datos1[-1, ] 
+datos1$id<-id1[2:201]
+meta1$id<-meta1$SampleID
+#left join of data from df1 and df2
+df1<-merge(datos1, meta1, by.x = "id",by.y="SampleID")
+df1$env<-as.factor(df1$env)
+
+#15 are not classified
+df1_lm<-df1[,-1]
+table(df1$env)
+#which values has variance 0
+colvar0<-apply(df1_lm,2,function(x) var(x,na.rm=T)==0)
+
+
+#get the column names
+print(paste("Names of the columns with all 0's or NA: ",names(df1_lm)[colvar0|is.na(colvar0)]))
+
+drop <- names(colvar0[colvar0==TRUE])[1:20]
+df = df1_lm[,!(names(df1_lm) %in% drop)]
+df<-subset(df,!is.na(df$env))
+```
+
+There are 15 rows without class and 20 columns with all 0's without include "env" and "id.y".
+
+The new dataset is 699 variables and 185 observations
+
+# PCA
+
+The principal components of a collection of points in a real coordinate space are a sequence of $p$ unit vectors, where the $i$-th vector is the direction of a line that best fits the data while being orthogonal to the first $i-1$ vectors. Here, a best-fitting line is defined as one that minimizes the average squared distance from the points to the line. These directions constitute an orthonormal basis in which different individual dimensions of the data are linearly uncorrelated. Principal component analysis (PCA) is the process of computing the principal components and using them to perform a change of basis on the data, sometimes using only the first few principal components and ignoring the rest.
+
+```{r}
+#PCA
+df1_pca<-df
+df1_pca$id.y<-NULL
+df1_pca$env<-NULL
+
+pcomp_df1 <- prcomp(df1_pca,scale=TRUE)
+plot(pcomp_df1)
+```
+
+As we can see in the superior graph the first PCA has over 140 of variance which is high enought than 45 of the second PCA.
+
+```{r}
+pve =100*pcomp_df1$sdev ^2/sum(pcomp_df1$sdev ^2)
+par(mfrow=c(1,2))
+plot(pve , type="o", ylab="PVE", xlab=" Principal Component ", col="blue")
+plot(cumsum(pve), type="o", ylab="Cumulative PVE", xlab="Principal Component ", col="brown3")
+summary(pcomp_df1)$importance
+```
+
+With the first two PCA we have about 27% of variance explained. In case WE want to have about 80% of variance explained we need to take about 48 PCA and about 78 for the 90% of variance explained.
+
+```{r}
+sd.data=scale(df1_pca)
+par(mfrow=c(1,3))
+data.dist=dist(sd.data)
+plot(hclust(data.dist), labels=df$env , main="Complete Linkage ", xlab="", sub="",ylab="")
+plot(hclust(data.dist , method ="average"), labels=df$env , main="Average Linkage ", xlab="", sub="",ylab="")
+plot(hclust(data.dist , method ="single"), labels=df$env , main="Single Linkage ", xlab="", sub="",ylab="")
+hc.out=hclust(dist(sd.data))
+hc.clusters =cutree (hc.out ,5)
+table(hc.clusters ,df$env)
+km.out=kmeans(sd.data , 5, nstart =20)
+km.clusters =km.out$cluster
+table(km.clusters ,hc.clusters)
+
+```
+
+The plots of dendograms above is with different types of linkage to group the samples. As we can see it is a huge amount of data and it is hard to achieve some information
+
+```{r}
+fviz_pca_ind(pcomp_df1, geom.ind = "point", 
+             col.ind = "#FC4E07", 
+             axes = c(1,2), 
+             pointsize = 1.5) 
+```
+
+This representation we can see is the first PCA and the points of each row. More than half of the points are over the 0 value of x-axis which is the PCA1 and are very disperse in the left side.
+
+```{r}
+colores <- function(vec){
+  # la función rainbow() devuelve un vector que contiene el número de colores distintos
+  col <- rainbow(length(unique(vec)))
+  return(col[as.numeric(as.factor(vec))])
+}
+
+par(mfrow = c(1,2))
+# Observaciones sobre PC1 y PC2
+plot(pcomp_df1$x[,1:2], col = colores(df$env), 
+     pch = 19, 
+     xlab = "Z1", 
+     ylab = "Z2")
+```
+
+In this representation we can see the plot of the two firsts PCAs with the class of each row. The points of different classes are crossed over all the graph.
+
+```{r}
+fviz_pca_var(pcomp_df1,col.var = "cos2", select.var = list(cos2 = 0.75))
+```
+
+Here we can see the variables which are over 0.75 of influence in the first PCA with negative values all of them
+
+```{r}
+#Eleccion de componentes principales
+fviz_screeplot(pcomp_df1, addlabels = TRUE, ylim = c(0, 30))
+```
+
+In this screeplot we can choose the dimensions of the PCA by the elbow rule which is a concordance of the minimum number of PCA and the maximum of variance explained.
+
+We have seen the choose of two PCA or dimensions due to be the easier way to visualize.
+
+```{r}
+fviz_contrib(pcomp_df1, choice = "var", axes = 1, top = 30)
+```
+
+Up here we can see the 30 variables which most influence are over the PCA1
+
+```{r,echo=FALSE}
+var <- get_pca_var(pcomp_df1)
+#which.max(var$contrib)
+#max(var$contrib)
+```
+
+# Neural Network
+
+For the classification of the classes of this problem the best approach was made using neural network with an arquitecture of 697 neurons of input, 400 neurons in the next layer, 200 in the next hidden layer and finally 5 neurons for the classification of the 5 class.
+
+```{r}
+#creating indices
+df$id.y<-NULL
+trainIndex <- createDataPartition(df$env,p=0.8,list=FALSE)
+
+#splitting data into training/testing data using the trainIndex object
+df1_pca_var_train <- df[trainIndex,] #training data (80% of data)
+
+df1_pca_var_test <- df[-trainIndex,] #testing data (20% of data)
+
+
+newdata <- one_hot(as.data.table(df1_pca_var_train))
+newdata_test<-one_hot(as.data.table(df1_pca_var_test))
+#Scale data
+
+#xo = apply(o,MARGIN = 2, FUN = range01)
+
+#newdata[, 1:697] <- data.frame(lapply(newdata[, 1:697], scl))
+
+colnames(newdata)<-paste("V",colnames(newdata),sep="")
+colnames(newdata_test)<-paste("V",colnames(newdata_test),sep="")
+n <- names(newdata)
+
+f <- as.formula(paste("Venv_Aurora+Venv_Lansing+Venv_Ithaca+Venv_Columbus+Venv_Urbana~", paste(n[!n %in% c("Venv_Aurora","Venv_Lansing","Venv_Ithaca","Venv_Columbus","Venv_Urbana")], collapse = "+")))
+
+
+
+#Entrenamos la red neuronal
+nn <- neuralnet( f,
+                data = newdata,
+                hidden = c(697,400,200, 5),
+                stepmax=1e6,
+                act.fct = "logistic",
+                linear.output = FALSE,
+                lifesign = "minimal")
+
+#plot(nn)
+# Compute predictions
+pr.nn <- compute(nn, newdata_test[, 1:697])
+# Extract results
+pr.nn_ <- pr.nn$net.result
+p_asignacion<-pr.nn$net.result
+# Accuracy (training set)
+original_values <- max.col(newdata_test[, 698:702])
+pr.nn_2 <- max.col(pr.nn_)
+
+
+confusionMatrix(as.factor(pr.nn_2),as.factor(original_values))
+table(pr.nn_2)
+table(original_values)
+
+```
+
+As we can see in the table above this classification is not as good as we desire because the accuracy it is about 0.5.
+
+# Conclusion
+
+The use of PCA was useful for us because we can see the influence of 30 variables in the PCA1 which explained above 20% of variance of the problem. Inside
+
+Neural Network is used with the original variables for the classification of the classes due to the predictive variables. We can say that we can improve our result if this type of input would be scaled and the use of PCA.
